@@ -1,82 +1,129 @@
 #include <stdint.h>
 #include <stm32f10x.h>
 
-// Переменные для управления частотой
-volatile uint32_t blink_frequency = 1; // 1 Гц по умолчанию
-volatile uint32_t blink_delay = 1000000; // Задержка для 1 Гц
+typedef struct 
+{
+    uint32_t arr_value;
+    int index;
+} frequency_t;
 
-void delay(uint32_t ticks) {
-    for (uint32_t i = 0; i < ticks; i++) {
+const frequency_t frequencies[] = 
+{
+    {64000000, -6},  // 1/64 Гц
+    {32000000, -5},  // 1/32 Гц
+    {16000000, -4},  // 1/16 Гц
+    {8000000,  -3},  // 1/8 Гц
+    {4000000,  -2},  // 1/4 Гц
+    {2000000,  -1},  // 1/2 Гц
+    {1000000,   0},  // 1 Гц
+    {500000,    1},  // 2 Гц
+    {250000,    2},  // 4 Гц
+    {125000,    3},  // 8 Гц
+    {62500,     4},  // 16 Гц
+    {31250,     5},  // 32 Гц
+    {15625,     6}   // 64 Гц
+};
+
+const int NUM_FREQUENCIES = 13;
+int current_freq_index = 6;
+int frequency_changed = 0;
+void TIM2_IRQHandler(void) 
+{
+    if (TIM2->SR & TIM_SR_UIF) 
+    { 
+        TIM2->SR &= ~TIM_SR_UIF;
+        GPIOC->ODR ^= GPIO_ODR_ODR13;
+    }
+}
+
+void init_led(void) 
+{
+    RCC->APB2ENR |= RCC_APB2ENR_IOPCEN;
+    GPIOC->CRH &= ~GPIO_CRH_CNF13;
+    GPIOC->CRH |= GPIO_CRH_MODE13_0;
+}
+
+void init_buttons(void) 
+{
+    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
+    GPIOB->CRL &= ~(GPIO_CRL_CNF0 | GPIO_CRL_CNF1);
+    GPIOB->CRL |= (GPIO_CRL_CNF0_1 | GPIO_CRL_CNF1_1);
+    GPIOB->BSRR = GPIO_BSRR_BS0 | GPIO_BSRR_BS1; 
+}
+
+void init_timer(void) 
+{
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+    TIM2->PSC = 6400 - 1; 
+    TIM2->ARR = frequencies[current_freq_index].arr_value / 10000 - 1;
+    TIM2->CNT = 0;
+    TIM2->DIER |= TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM2_IRQn);
+    NVIC_SetPriority(TIM2_IRQn, 0);
+    
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+void handle_buttons(void) 
+{
+    // PB0 - увеличение частоты
+    if (!(GPIOB->IDR & GPIO_IDR_IDR0)) 
+    {
+        if (current_freq_index < NUM_FREQUENCIES - 1) 
+        {
+            current_freq_index++;
+            frequency_changed = 1;
+            TIM2->ARR = TIM2->ARR >> 1;
+        }
+        while (!(GPIOB->IDR & GPIO_IDR_IDR0)) {
+        }
+        return;
+    }
+    
+    // PB1 - уменьшение частоты
+    if (!(GPIOB->IDR & GPIO_IDR_IDR1)) 
+    {
+        if (current_freq_index > 0) 
+        {
+            current_freq_index--;
+            frequency_changed = 1;
+            TIM2->ARR = TIM2->ARR << 1;
+        }
+        while (!(GPIOB->IDR & GPIO_IDR_IDR1)) {
+        }
+        return;
+    }
+}
+
+void delay(uint32_t ticks) 
+{
+    for (volatile uint32_t i = 0; i < ticks; i++) 
+    {
         __NOP();
     }
 }
 
-// Функция для чтения состояния кнопок
-uint8_t read_button_a(void) {
-    return (GPIOD->IDR & GPIO_IDR_IDR6) == 0; // PD6 - кнопка A
-}
-
-uint8_t read_button_b(void) {
-    return (GPIOD->IDR & GPIO_IDR_IDR7) == 0; // PD7 - кнопка B
-}
-
-// Функция обновления задержки на основе частоты
-void update_delay(void) {
-    blink_delay = 1000000 / blink_frequency;
-}
-
-// Функция обработки нажатий кнопок
-void process_buttons(void) {
-    static uint32_t last_check = 0;
-    static uint32_t counter = 0;
-    
-    counter++;
-    if (counter - last_check < 100000) {
-        return;
-    }
-    last_check = counter;
-    
-    // Кнопка A работает только если частота меньше 64 Гц
-    if (read_button_a() && blink_frequency < 64) {
-        blink_frequency *= 2;
-        update_delay();
-    }
-    
-    // Кнопка B работает только если частота больше 1/64 Гц  
-    if (read_button_b() && blink_frequency > 1) {
-        blink_frequency /= 2;
-        update_delay();
-    }
-}
-
-int __attribute__((noreturn)) main(void) {
-    // Enable clock for AFIO
+int main(void) 
+{
     RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
-    // Enable clock for GPIOC (светодиод)
-    RCC->APB2ENR |= RCC_APB2ENR_IOPCEN;
-    // Enable clock for GPIOD (кнопки)
-    RCC->APB2ENR |= RCC_APB2ENR_IOPDEN;
     
-    // Configure PC13 as push-pull output (светодиод)
-    GPIOC->CRH &= ~GPIO_CRH_CNF13; // clear CNF bits
-    GPIOC->CRH |= GPIO_CRH_MODE13_0; // Max speed = 10MHz
+    init_led();
+    init_buttons();
+    init_timer();
     
-    // Configure PD6 and PD7 as input with pull-up (кнопки)
-    GPIOD->CRL &= ~(GPIO_CRL_CNF6 | GPIO_CRL_CNF7); // clear CNF bits
-    GPIOD->CRL |= (GPIO_CRL_CNF6_1 | GPIO_CRL_CNF7_1); // Input with pull-up/pull-down
-    GPIOD->BSRR = GPIO_BSRR_BS6 | GPIO_BSRR_BS7; // Set pull-up
-    
-    // Отключаем JTAG чтобы освободить PD pins
-    AFIO->MAPR |= AFIO_MAPR_SWJ_CFG_1; // JTAG-DP Disabled, SW-DP Enabled
-
-    while (1) {
-        // Обрабатываем нажатия кнопок
-        process_buttons();
-        
-        // Переключаем светодиод
-        GPIOC->ODR |= (1U << 13U); // Включить
-        delay(blink_delay);
-        GPIOC->ODR &= ~(1U << 13U); // Выключить
-        delay(blink_delay);
+    while (1) 
+    {
+        handle_buttons();
+        if (frequency_changed) 
+        {
+            for (int i = 0; i < 3; i++) 
+            {
+                GPIOC->ODR |= GPIO_ODR_ODR13;
+                delay(100000);
+                GPIOC->ODR &= ~GPIO_ODR_ODR13;
+                delay(100000);
+            }
+            frequency_changed = 0;
+        }
     }
 }
